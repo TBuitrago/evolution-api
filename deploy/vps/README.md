@@ -68,12 +68,16 @@ Siguiendo la convención que ya usa el servidor (`/docker/n8n`):
 mkdir -p /docker/evolution && cd /docker/evolution
 ```
 
-Subir a esa carpeta `docker-compose.yml` y `.env.example` de este directorio
-(`deploy/vps/` del repo). Por ejemplo, desde tu máquina:
+Bajar `docker-compose.yml` y `.env.example` directamente desde el repo:
 
 ```bash
-scp deploy/vps/docker-compose.yml deploy/vps/.env.example root@2.24.199.234:/docker/evolution/
+BASE=https://raw.githubusercontent.com/TBuitrago/evolution-api/claude/whatsapp-qr-vps-setup-oo490g/deploy/vps
+curl -fsSL "$BASE/docker-compose.yml" -o docker-compose.yml
+curl -fsSL "$BASE/.env.example"       -o .env.example
+curl -fsSL "$BASE/README.md"          -o README.md
 ```
+
+(Si el repo pasa a ser privado, subirlos con `scp` desde una máquina con acceso.)
 
 ---
 
@@ -112,8 +116,12 @@ sed -i "s|^DATABASE_CONNECTION_URI=.*|DATABASE_CONNECTION_URI=postgresql://evolu
 
 chmod 600 .env
 
-# Confirmar que no quedó ningún placeholder
-grep -n "CAMBIAR" .env || echo "OK: sin placeholders"
+# Verificar que no quedaron placeholders (ignorando comentarios)
+grep -n "^[^#].*<<<" .env && echo "FALTA REEMPLAZAR lo de arriba" || echo "OK: .env completo"
+
+# Ver los valores criticos con la password enmascarada
+grep -E "^(SERVER_URL|DATABASE_CONNECTION_URI|CACHE_REDIS_URI)=" .env \
+  | sed -E 's|(://[^:]+:)[^@]+@|\1***@|'
 ```
 
 Guardá `API_KEY` y `DB_PASS` en tu gestor de contraseñas. La API key es la llave
