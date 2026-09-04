@@ -199,6 +199,10 @@ El QR vence en ~40 segundos y se regenera hasta `QRCODE_LIMIT=30` veces.
 
 ## Paso 7 — Conectar con n8n
 
+> Para quien construya la automatización, hay una guía de integración aparte con el
+> contrato de datos completo, los tipos de mensaje y las reglas obligatorias:
+> [`n8n-integracion.md`](./n8n-integracion.md).
+
 Ambos contenedores están en la red `n8n_default`, así que se hablan por nombre
 interno sin salir a internet.
 
