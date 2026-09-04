@@ -261,6 +261,7 @@ editar el tag en `docker-compose.yml`, **hacer el backup primero**, y luego
 | 404 de Traefik en el dominio | El router no cargó | `docker logs n8n-traefik-1 \| grep -i evolution`; verificar que el label `traefik.enable=true` está y que el contenedor está en `n8n_default` |
 | Certificado inválido / `TRAEFIK DEFAULT CERT` | DNS mal o proxy de Cloudflare activo | Paso 0. El desafío TLS-ALPN-01 necesita el 443 directo |
 | `Migration failed` en el arranque | Rol o base mal creados | Repetir el paso 2 y revisar el `DATABASE_CONNECTION_URI` |
+| 500 `Not allowed by CORS` en todos los endpoints | `CORS_ORIGIN` distinto de `*` | Ponerlo en `*`. El handler de `src/main.ts` rechaza las peticiones sin header `Origin`; no es configurable a un dominio. |
 | El QR no aparece en el manager | WebSocket bloqueado o `SERVER_URL` mal | Confirmar `SERVER_URL=https://evo.tbadigitals.com` y `WEBSOCKET_ENABLED=true` |
 | Se desconecta solo cada rato | Sesión invalidada por WhatsApp | Revisar `docker compose logs api \| grep -i "connection"`; puede requerir re-vincular |
 | Contenedor reiniciando sin parar | OOM en 1 vCPU / 3.8 GB | `docker stats`; revisar que `DATABASE_SAVE_DATA_HISTORIC=false` |
