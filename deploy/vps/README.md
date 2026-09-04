@@ -233,11 +233,20 @@ curl -s -X POST https://evo.tbadigitals.com/webhook/set/tba \
 cd /docker/evolution
 
 docker compose logs -f api          # logs
-docker compose restart api          # reiniciar
+docker compose restart api          # reiniciar (NO relee el .env)
 docker compose down                 # bajar (NO borra volúmenes)
 docker compose pull && docker compose up -d   # actualizar (ver aviso abajo)
 docker stats --no-stream            # consumo de recursos
 ```
+
+> **Un cambio en `.env` no se aplica con `restart`.** Las variables quedan fijadas
+> en el contenedor cuando se crea, así que `restart` vuelve a arrancar el mismo
+> contenedor con los valores viejos. Para aplicar un cambio hay que recrearlo:
+>
+> ```bash
+> docker compose up -d --force-recreate api
+> docker exec evolution_api printenv NOMBRE_DE_LA_VARIABLE   # verificar
+> ```
 
 **Backup.** Lo crítico es la base `evolution`: ahí viven la sesión de WhatsApp y
 los mensajes. Sin ella hay que re-escanear el QR.
