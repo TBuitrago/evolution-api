@@ -382,8 +382,30 @@ docker exec -i postgres-bots psql -U n8nbots -d bots < bot-estado.sql
 docker exec -i postgres-bots psql -U n8nbots -d bots -c '\d bot_estado' -c '\d bot_enviado'
 ```
 
-El script es idempotente. En n8n hay que crear una credencial **Postgres**:
-host `postgres-bots`, puerto `5432`, base `bots`, usuario `n8nbots`.
+El script es idempotente.
+
+**Crear un rol dedicado** en vez de usar `n8nbots` en la credencial de n8n:
+`n8nbots` es el **superusuario** del cluster, y esa base la comparten otros
+procesos. `sql/bot-rol-n8n.sql` crea el rol `bot_n8n`, que solo alcanza las tres
+tablas del bot:
+
+```bash
+curl -fsSL "$BASE/sql/bot-rol-n8n.sql" -o bot-rol-n8n.sql
+CLAVE=$(openssl rand -hex 24); echo "GUARDA ESTO: $CLAVE"
+docker exec -i postgres-bots psql -U n8nbots -d bots -v clave="'$CLAVE'" < bot-rol-n8n.sql
+```
+
+Credencial **Postgres** en n8n: host `postgres-bots`, puerto `5432`, base `bots`,
+usuario `bot_n8n`, la clave generada, SSL `disable`.
+
+Ese rol necesita `CREATE` sobre el schema `public` y no es un descuido: el nodo
+*Postgres Chat Memory* de n8n ejecuta `CREATE TABLE IF NOT EXISTS` en cada
+corrida, y PostgreSQL evalúa el permiso **antes** del `IF NOT EXISTS`, así que
+precrear la tabla no evita el requisito. Aun con ese permiso, `bot_n8n` no puede
+borrar ni alterar las tablas del bot (no es su dueño), ni leer ninguna otra tabla
+de la base, ni crear roles o bases, ni volverse superusuario. Lo único que sí
+puede, por diseño de PostgreSQL, es cambiar su propia contraseña; si eso pasara,
+se restablece volviendo a correr el script como `n8nbots`.
 
 ### 7.2 Las dos tablas
 
