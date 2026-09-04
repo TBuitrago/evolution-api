@@ -4,7 +4,8 @@
 -- Reemplaza el uso de "n8nbots" (que es SUPERUSUARIO del cluster) en la
 -- credencial de n8n. El rol resultante solo puede tocar las tablas del bot.
 --
--- Requiere que bot-estado.sql y bot-buffer.sql ya esten instalados.
+-- Requiere que bot-estado.sql y bot-buffer.sql ya esten instalados; si falta
+-- alguna tabla, aborta sin crear nada y dice cual.
 --
 -- Instalacion:
 --   CLAVE=$(openssl rand -hex 24); echo "GUARDA ESTO: $CLAVE"
@@ -14,6 +15,27 @@
 -- ============================================================================
 
 \set ON_ERROR_STOP on
+
+-- ----------------------------------------------------------------------------
+-- 0. Comprobar dependencias ANTES de tocar nada
+--
+-- Sin esto, el script fallaba a mitad de camino y dejaba el rol creado pero sin
+-- permisos sobre las tablas.
+-- ----------------------------------------------------------------------------
+DO $$
+DECLARE faltan text;
+BEGIN
+  SELECT string_agg(t, ', ') INTO faltan
+  FROM unnest(ARRAY['bot_estado', 'bot_enviado', 'bot_buffer']) AS t
+  WHERE to_regclass('public.' || t) IS NULL;
+
+  IF faltan IS NOT NULL THEN
+    RAISE EXCEPTION E'Faltan tablas: %.\n\nInstalar primero, desde /docker/evolution:\n  docker exec -i postgres-bots psql -U n8nbots -d bots < bot-estado.sql\n  docker exec -i postgres-bots psql -U n8nbots -d bots < bot-buffer.sql\n\nNo se creo ni se modifico nada.', faltan;
+  END IF;
+END $$;
+
+-- Todo o nada: si algo falla, no queda un rol a medio configurar.
+BEGIN;
 
 -- ----------------------------------------------------------------------------
 -- 1. El rol
@@ -62,6 +84,8 @@ GRANT USAGE, SELECT ON SEQUENCE bot_buffer_id_seq TO bot_n8n;
 -- ----------------------------------------------------------------------------
 GRANT SELECT ON vw_bot_estado, vw_bot_buffer TO bot_n8n;
 GRANT EXECUTE ON FUNCTION bot_enviado_purgar(), bot_buffer_purgar() TO bot_n8n;
+
+COMMIT;
 
 -- ----------------------------------------------------------------------------
 -- 5. Resumen
