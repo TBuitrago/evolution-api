@@ -180,13 +180,19 @@ subir `base64` a `true`.
 flujo responde sin filtrar, el bot contesta su propia respuesta y se dispara en
 bucle hasta que WhatsApp bloquea el número.
 
-**Primer nodo después del Webhook, siempre**, un *IF* o *Filter*:
+**Primer nodo después del Webhook, siempre**, ramificando por `fromMe`:
 
 ```
-{{ $json.body.data.key.fromMe }}   →   Boolean   →   is false
+{{ $json.body.data.key.fromMe }}   →   Boolean
 ```
 
-Es la causa número uno de números baneados en Evolution.
+Solo la rama `false` puede llegar a responder. Es la causa número uno de números
+baneados en Evolution.
+
+> Un *Filter* que descarte los `fromMe: true` también sirve y es lo mínimo. Pero
+> conviene un *Switch* que los enrute: esos eventos son justamente los que avisan
+> que un asesor tomó la conversación a mano, y sobre ellos se construye la pausa
+> del bot. Ver **§7**.
 
 ### 3.2 Ignorar mensajes que no son conversación
 
@@ -354,7 +360,182 @@ dedicado, no el personal de nadie.
 
 ---
 
-## 7. Comprobaciones rápidas
+## 7. Pausar el bot: escalado a humano y leads no viables
+
+El bot no debe responder siempre. Dos casos:
+
+- **Escalado.** Un asesor tomó la conversación. El bot se calla mientras dure.
+- **No viable.** El lead se descartó. El bot no vuelve a responderle.
+
+Evolution **no** ofrece esto para el webhook crudo (su gestión de sesiones vive en
+el módulo de chatbots nativo, que usa otro contrato de datos). Se resuelve con dos
+tablas propias en la base `bots` de `postgres-bots`, que n8n ya alcanza.
+
+### 7.1 Instalación
+
+```bash
+cd /docker/evolution
+curl -fsSL https://raw.githubusercontent.com/TBuitrago/evolution-api/claude/whatsapp-qr-vps-setup-oo490g/deploy/vps/sql/bot-estado.sql -o bot-estado.sql
+docker exec -i postgres-bots psql -U n8nbots -d bots < bot-estado.sql
+
+# Verificar
+docker exec -i postgres-bots psql -U n8nbots -d bots -c '\d bot_estado' -c '\d bot_enviado'
+```
+
+El script es idempotente. En n8n hay que crear una credencial **Postgres**:
+host `postgres-bots`, puerto `5432`, base `bots`, usuario `n8nbots`.
+
+### 7.2 Las dos tablas
+
+| Tabla | Para qué |
+|---|---|
+| `bot_estado` | Una fila **solo** por contacto bloqueado. Sin fila = bot activo. |
+| `bot_enviado` | `key.id` de lo que envió el bot. Vida corta, se purga sola. |
+
+`bot_estado.hasta` es la clave de la pausa temporal: `NULL` = indefinida, una fecha
+= el bot retoma solo al vencer. **No hace falta ningún cron**, la condición va en
+la propia consulta.
+
+También queda la vista `vw_bot_estado`, en lenguaje humano, para que el equipo
+comercial pueda revisar quién está pausado y por qué.
+
+### 7.3 El problema de distinguir al bot del asesor
+
+Cuando el asesor responde desde su celular llega un `MESSAGES_UPSERT` con
+`fromMe: true`. **Pero los mensajes que envía el bot llegan exactamente igual**, y
+no se pueden distinguir:
+
+- Por el evento no: `SEND_MESSAGE` se emite en el envío por API
+  (`whatsapp.baileys.service.ts:2545`), pero el handler de `messages.upsert`
+  procesa también los `append` que Baileys genera al enviar (línea 1165).
+- Por `data.source` tampoco: la API sale como `web`, y el asesor usando WhatsApp
+  Web desde el computador también. Colisionan.
+
+Por eso `bot_enviado`: cada vez que el bot envía algo, se guarda el `key.id` que
+devuelve la respuesta. Si llega un `fromMe: true` cuyo `key.id` **no** está en esa
+tabla, lo escribió una persona.
+
+> ⚠️ **Hay una carrera.** Evolution emite el webhook durante el envío, así que el
+> `MESSAGES_UPSERT` del propio mensaje del bot puede llegar a n8n **antes** de que
+> el nodo alcance a guardar el `key.id`. Poner un nodo **Wait de 5 segundos** al
+> inicio de la rama `fromMe: true`, antes de consultar `bot_enviado`. Sin ese Wait,
+> el bot se pausa a sí mismo de forma intermitente y aleatoria.
+
+### 7.4 La forma del flujo
+
+Esto refina la regla de §3.1: el `fromMe: true` **no se descarta**, se enruta.
+
+```
+Webhook (POST)
+   │
+   ▼
+Switch  ──  data.key.fromMe
+   │
+   ├── true ─► Wait 5s ─► ¿key.id está en bot_enviado?
+   │                          ├── sí ─► fin (lo envió el bot)
+   │                          └── no ─► UPSERT bot_estado = 'pausado'
+   │                                     hasta = now() + 24h
+   │
+   └── false ─► ¿hay fila en bot_estado?
+                    ├── sí ─► fin (escalado o descartado)
+                    └── no ─► lógica del bot
+                                 └─► enviar respuesta
+                                      └─► INSERT key.id en bot_enviado
+```
+
+Con eso, **el asesor solo tiene que responder desde WhatsApp** y el bot se calla
+para ese contacto durante 24 horas. Sin comandos, sin botones, sin que nadie tenga
+que acordarse de nada.
+
+### 7.5 Las consultas, listas para pegar
+
+Nodo *Postgres* en modo **Execute Query**, con parámetros posicionales.
+
+**A. ¿Debe responder el bot?** — rama `fromMe: false`, antes de toda la lógica.
+
+```sql
+SELECT estado, motivo
+FROM bot_estado
+WHERE remote_jid = $1
+  AND (estado = 'no_viable' OR hasta IS NULL OR hasta > now());
+```
+
+Parámetro: `{{ $json.body.data.key.remoteJid }}`.
+**0 filas → el bot responde. 1 fila → el flujo termina ahí.**
+
+**B. ¿Lo envió el bot?** — rama `fromMe: true`, después del Wait de 5 s.
+
+```sql
+SELECT EXISTS (SELECT 1 FROM bot_enviado WHERE key_id = $1) AS lo_envio_el_bot;
+```
+
+Parámetro: `{{ $json.body.data.key.id }}`.
+
+**C. Pausar porque respondió el asesor.**
+
+```sql
+INSERT INTO bot_estado (remote_jid, estado, motivo, pausado_por, hasta)
+VALUES ($1, 'pausado', 'respuesta manual del asesor', 'asesor', now() + interval '24 hours')
+ON CONFLICT (remote_jid) DO UPDATE
+SET estado = 'pausado', motivo = EXCLUDED.motivo, pausado_por = EXCLUDED.pausado_por,
+    hasta = EXCLUDED.hasta, actualizado = now();
+```
+
+**D. Marcar el lead como no viable** — desde la lógica del flujo.
+
+```sql
+INSERT INTO bot_estado (remote_jid, estado, motivo, pausado_por, hasta)
+VALUES ($1, 'no_viable', $2, 'flujo', NULL)
+ON CONFLICT (remote_jid) DO UPDATE
+SET estado = 'no_viable', motivo = EXCLUDED.motivo, hasta = NULL, actualizado = now();
+```
+
+Parámetros: el `remoteJid` y el motivo.
+
+**E. Registrar el envío del bot** — justo después del nodo HTTP Request que envía.
+
+```sql
+INSERT INTO bot_enviado (key_id, remote_jid) VALUES ($1, $2)
+ON CONFLICT (key_id) DO NOTHING;
+SELECT bot_enviado_purgar();
+```
+
+Parámetros: `{{ $json.key.id }}` y `{{ $json.key.remoteJid }}`. El endpoint de envío
+devuelve el objeto del mensaje (`whatsapp.baileys.service.ts:2557`), así que el
+`key.id` sale de la respuesta del propio HTTP Request.
+
+`bot_enviado_purgar()` borra lo que tenga más de 2 horas. Al llamarla en cada
+inserción, la tabla se mantiene sola y no hace falta ninguna tarea programada.
+
+**F. Reactivar un contacto** — manual, o desde un flujo de administración.
+
+```sql
+DELETE FROM bot_estado WHERE remote_jid = $1;
+```
+
+**G. Consultar quién está bloqueado.**
+
+```sql
+SELECT numero, estado, situacion, motivo, pausado_por FROM vw_bot_estado;
+```
+
+### 7.6 Detalles a tener en cuenta
+
+- **Las 24 horas son un punto de partida**, no una verdad. Ajustar `interval '24 hours'`
+  en la consulta C a lo que tenga sentido para el negocio.
+- **Guardar el `remoteJid` completo**, con su sufijo, tal como llega. No recortarlo.
+- **Ojo con `@lid`.** Un mismo contacto puede aparecer como `...@s.whatsapp.net` y
+  como `...@lid` según el caso. Si se ve ese comportamiento, normalizar usando
+  `key.remoteJidAlt` antes de escribir en `bot_estado`, o el mismo lead quedaría
+  con dos filas y la pausa no serviría.
+- **Los mensajes que el asesor manda antes de que exista la fila** también pausan:
+  el UPSERT crea la fila si no está.
+- La consulta A es una sola lectura por mensaje entrante, sobre una clave primaria.
+  El costo es despreciable, incluso en este servidor.
+
+---
+
+## 8. Comprobaciones rápidas
 
 Desde el VPS, en `/docker/evolution`:
 
@@ -389,7 +570,7 @@ Acordarse de volver a `LOG_LEVEL=ERROR,WARN,INFO,LOG` al terminar.
 
 ---
 
-## 8. Problemas frecuentes
+## 9. Problemas frecuentes
 
 | Síntoma | Causa | Solución |
 |---|---|---|
@@ -398,12 +579,14 @@ Acordarse de volver a `LOG_LEVEL=ERROR,WARN,INFO,LOG` al terminar.
 | Llega el evento pero el nodo no arranca | El nodo Webhook está en GET | Cambiarlo a POST |
 | El bot se responde a sí mismo | Falta el filtro `fromMe` | §3.1 |
 | El mismo mensaje se procesa varias veces | Reintentos por respuesta lenta | §3.3 |
+| El bot se pausa a sí mismo de vez en cuando | Falta el *Wait* de 5 s antes de consultar `bot_enviado` | §7.3: el webhook del propio envío puede ganarle al `INSERT` del `key.id` |
+| El bot no responde a nadie | Hay filas de más en `bot_estado` | `SELECT * FROM vw_bot_estado;` y limpiar con la consulta F de §7.5 |
 | `state: "close"` | La sesión se cayó | Re-vincular por QR desde el manager |
 | El manager no muestra chats | `DATABASE_SAVE_DATA_HISTORIC=false` | Es esperado, ver §6 |
 
 ---
 
-## 9. Decisiones pendientes
+## 10. Decisiones pendientes
 
 Cosas que quedaron sin definir y que el flujo va a tener que resolver:
 
@@ -411,9 +594,9 @@ Cosas que quedaron sin definir y que el flujo va a tener que resolver:
    transcribirlos, hay que llamar `getBase64FromMediaMessage` y mandar el binario a
    un servicio de transcripción — con el costo de CPU y de red que eso implica.
 2. **Grupos: dentro o fuera.** Definirlo y dejar `groupsIgnore` acorde.
-3. **Handoff a humano.** No hay ninguna lógica de "el bot se calla y contesta una
-   persona". Si se necesita, hay que construirla en n8n (una bandera por
-   `remoteJid` con estado en la base de n8n o en Redis).
+3. ~~**Handoff a humano.**~~ **Resuelto**, ver §7: tablas `bot_estado` y
+   `bot_enviado`, con las consultas listas. Queda por decidir solo la duración de
+   la pausa automática (hoy propuesta en 24 h) y quién puede reactivar un contacto.
 4. **Horario de atención.** No hay nada configurado. Si el bot no debe responder de
    madrugada, es lógica de n8n.
 5. **Qué se guarda y dónde.** Evolution guarda los mensajes en su Postgres, pero no
